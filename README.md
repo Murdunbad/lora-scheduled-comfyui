@@ -67,8 +67,6 @@ After installation the node appears under **`advanced/lora_schedule → LoRA Sch
 
 > **Progress convention:** `0.0` is the first denoising step (pure noise), `1.0` is the final step (finished image). The LoRA is active **between** `inject_at` and `stop_at`.
 
-> **Turning the node off:** use ComfyUI's standard **bypass** (select the node and press `Ctrl+B`). The effect disappears on the next run, no restart needed.
-
 ---
 
 ## Recommended settings (feel free to adjust and find optimal)
