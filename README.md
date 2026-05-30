@@ -75,27 +75,16 @@ Let the base model build the composition, then bring the LoRA in:
 
 ```
 lora_strength = 1.0 - 1.5
-inject_at     = 0.1 – 0.3
-stop_at       = 1.0
-fade          = 0.1
-```
-
-- **`inject_at` is your main dial.** Lower (0.1) = more fidelity, the LoRA locks in sooner. Higher (0.3) = more pose/angle diversity, the effect is slightly softer.
-- Values above ~0.3 tend to weaken the result noticeably; values below ~0.1 start to constrain composition like a normal loader. **0.1–0.3 is the sweet spot.**
-- Because the LoRA is off during composition, you have more headroom on `lora_strength` than you normally would.
-
-### Preset — maximum composition preservation (character-only LoRA)
-
-These values keep the base model's composition almost entirely intact and let the LoRA affect mostly the **character / subject**, not the overall scene:
-
-```
-lora_strength = 1.0 - 1.5
-inject_at     = 0.3
+inject_at     = 0.15 – 0.20
 stop_at       = 1.0
 fade          = 0.0
 ```
 
-The first 30% of the denoise runs with no LoRA at all (composition, poses, and camera angles stay fully driven by the base model), then the LoRA switches on at full strength for the rest of the run to lock in the character. This is the best starting point if your priority is **keeping diverse, original compositions** while still getting a recognizable character.
+- **`inject_at` is your main dial.** Lower (0.1) = more fidelity, the LoRA locks in sooner. Higher (0.3) = more pose/angle diversity, the effect is slightly softer.
+- Values above ~0.3 tend to weaken the result noticeably; values below ~0.1 start to constrain composition like a normal loader. **0.15–0.20 is the sweet spot.**
+- Because the LoRA is off during composition, you have more headroom on `lora_strength` than you normally would.
+
+```
 
 > **Base model matters.** This node relies on the base model's own compositional variety during the early steps. **Merged checkpoints tend to have significantly reduced diversity** — their compositions are already collapsed toward a narrow distribution, so there is little variety left for the node to preserve. For best results use a clean base model rather than a merge; on merges the benefit of timestep scheduling is largely lost.
 
