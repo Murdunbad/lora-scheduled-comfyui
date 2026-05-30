@@ -14,7 +14,6 @@ But the **composition of an image is decided in the early denoising steps**, whi
 
 - **Diverse poses and camera angles** (driven by the base model)
 - **Consistent character / style** (driven by the LoRA, applied late)
-- **Headroom for high LoRA strengths** without composition collapse
 
 ---
 
