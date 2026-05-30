@@ -74,7 +74,7 @@ After installation the node appears under **`advanced/lora_schedule → LoRA Sch
 Let the base model build the composition, then bring the LoRA in:
 
 ```
-lora_strength = 1.0
+lora_strength = 1.0 - 1.5
 inject_at     = 0.1 – 0.3   (recommended range)
 stop_at       = 1.0
 fade          = 0.1
