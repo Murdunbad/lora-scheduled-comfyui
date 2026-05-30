@@ -22,12 +22,6 @@ But the **composition of an image is decided in the early denoising steps**, whi
 
 Unlike a normal LoRA loader that merges weights, this node **hooks the forward pass** of the affected modules and adds the LoRA's low-rank contribution to their output, scaled by a weight that depends on the current denoising progress.
 
-- The forward hook is installed **once per module** and is harmless when inactive.
-- The contribution only fires while the node is active in the running model (gated), so **bypassing or removing the node takes effect immediately — no ComfyUI restart required**.
-- Because it adds to the *output* (not the stored weights), it **survives dynamic VRAM loading / weight streaming** used by large DiT models like Anima.
-
-The active period is a **window** defined by `inject_at` and `stop_at`, with optional `fade` for smooth edges.
-
 ---
 
 ## Installation
