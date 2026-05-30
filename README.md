@@ -1,0 +1,154 @@
+# LoRA Scheduled (Timestep)
+
+A custom ComfyUI node that applies a LoRA only during a **specific window of the denoising process**, instead of throughout the entire generation.
+
+This lets you keep a base model's compositional diversity (poses, camera angles, framing) while still injecting a LoRA's style or character at the right moment. It was developed and tested with **Anima / Qwen-Image** DiT models, but works with any LoRA whose keys map onto the diffusion model.
+
+---
+
+## Why?
+
+Applying a LoRA at full strength for the whole generation forces the model toward the LoRA's learned distribution from the very first step — which locks in composition and kills variety across seeds.
+
+But the **composition of an image is decided in the early denoising steps**, while **style, character identity, and fine detail emerge later**. By switching a LoRA on *after* the composition has formed, you get:
+
+- **Diverse poses and camera angles** (driven by the base model)
+- **Consistent character / style** (driven by the LoRA, applied late)
+- **Headroom for high LoRA strengths** without composition collapse
+
+---
+
+## How it works
+
+Unlike a normal LoRA loader that merges weights, this node **hooks the forward pass** of the affected modules and adds the LoRA's low-rank contribution to their output, scaled by a weight that depends on the current denoising progress.
+
+- The forward hook is installed **once per module** and is harmless when inactive.
+- The contribution only fires while the node is active in the running model (gated), so **bypassing or removing the node takes effect immediately — no ComfyUI restart required**.
+- Because it adds to the *output* (not the stored weights), it **survives dynamic VRAM loading / weight streaming** used by large DiT models like Anima.
+
+The active period is a **window** defined by `inject_at` and `stop_at`, with optional `fade` for smooth edges.
+
+---
+
+## Installation
+
+### Option 1 — ComfyUI Manager (Install via Git URL)
+
+If you have [ComfyUI-Manager](https://github.com/ltdrdata/ComfyUI-Manager) installed:
+
+1. Open **ComfyUI Manager**.
+2. Click **Install via Git URL**.
+3. Paste this repository's URL:
+   ```
+   https://github.com/YOUR_USERNAME/YOUR_REPO.git
+   ```
+4. Click **OK**, then **Restart** ComfyUI when prompted.
+
+### Option 2 — Manual
+
+1. Clone or download this repository into your ComfyUI `custom_nodes` folder:
+
+   ```
+   ComfyUI/custom_nodes/lora_scheduled/
+   ```
+
+   so that `__init__.py` sits inside that folder.
+
+2. Restart ComfyUI.
+
+After installation the node appears under **`advanced/lora_schedule → LoRA Scheduled (timestep)`**.
+
+---
+
+## Parameters
+
+| Parameter | Description |
+|---|---|
+| `model` | Model input. Chainable — connect the output to another node of this type to stack multiple scheduled LoRAs. |
+| `lora_name` | The LoRA file to load (from your `models/loras` folder). |
+| `lora_strength` | LoRA strength, same meaning as in a normal loader. Higher = stronger effect. |
+| `inject_at` | Denoise percent at which the LoRA **turns on** (`0.0` = start, `1.0` = end). |
+| `stop_at` | Denoise percent at which the LoRA **turns off**. |
+| `fade` | Smoothing applied to both edges of the window (`0.0` = hard on/off, `0.1`–`0.2` = soft). |
+| `force_rerun` | `True`: every queue forces a fresh generation (useful while tuning, prevents cached results). `False`: normal ComfyUI caching. |
+
+> **Progress convention:** `0.0` is the first denoising step (pure noise), `1.0` is the final step (finished image). The LoRA is active **between** `inject_at` and `stop_at`.
+
+> **Turning the node off:** use ComfyUI's standard **bypass** (select the node and press `Ctrl+B`). The effect disappears on the next run, no restart needed.
+
+---
+
+## Recommended settings (feel free to adjust and find optimal)
+
+Let the base model build the composition, then bring the LoRA in:
+
+```
+lora_strength = 1.0
+inject_at     = 0.1 – 0.3   (recommended range)
+stop_at       = 1.0
+fade          = 0.1
+```
+
+- **`inject_at` is your main dial.** Lower (0.1) = more fidelity, the LoRA locks in sooner. Higher (0.3) = more pose/angle diversity, the effect is slightly softer.
+- Values above ~0.3 tend to weaken the result noticeably; values below ~0.1 start to constrain composition like a normal loader. **0.1–0.3 is the sweet spot.**
+- Because the LoRA is off during composition, you have more headroom on `lora_strength` than you normally would.
+
+### Preset — maximum composition preservation (character-only LoRA)
+
+These values keep the base model's composition almost entirely intact and let the LoRA affect mostly the **character / subject**, not the overall scene:
+
+```
+lora_strength = 1.0
+inject_at     = 0.3
+stop_at       = 1.0
+fade          = 0.0
+```
+
+The first 30% of the denoise runs with no LoRA at all (composition, poses, and camera angles stay fully driven by the base model), then the LoRA switches on at full strength for the rest of the run to lock in the character. This is the best starting point if your priority is **keeping diverse, original compositions** while still getting a recognizable character.
+
+> **Base model matters.** This node relies on the base model's own compositional variety during the early steps. **Merged checkpoints tend to have significantly reduced diversity** — their compositions are already collapsed toward a narrow distribution, so there is little variety left for the node to preserve. For best results use a clean base model rather than a merge; on merges the benefit of timestep scheduling is largely lost.
+
+---
+
+## Chaining multiple LoRAs
+
+The node is chainable. Each instance manages its own window, so you can combine LoRAs that operate in different phases:
+
+```
+base model
+  └─ LoRA Scheduled (LoRA A, inject_at 0.1, stop_at 1.0)
+       └─ LoRA Scheduled (LoRA B, inject_at 0.2, stop_at 1.0)
+            └─ KSampler  (single sampler — no split needed)
+```
+
+Each LoRA can be injected at its own point in the denoise, all feeding a single sampler.
+
+---
+
+## Tips
+
+- **Tuning:** keep `force_rerun = True` while searching for good values so you always get a fresh generation. Switch it to `False` once you've locked your settings.
+- **Console debug:** the node prints the per-step weight for the first several steps, e.g.
+  ```
+  [LoRAScheduled] sigma=... active=['MyLora'] w={'MyLora': 0.0}
+  ...
+  [LoRAScheduled] sigma=... w={'MyLora': 1.0}
+  ```
+  Use this to confirm the LoRA is off early and ramps up exactly where you expect.
+- **Narrow windows + large fade:** if the window is small (e.g. `0.0–0.2`) keep `fade` low (`0.05–0.1`), otherwise the fades eat into the plateau and the LoRA never reaches full strength. The node clamps this to stay safe, but you'll get a weaker peak.
+
+---
+
+## Notes & limitations
+
+- **Use a clean base model, not a merge.** Diversity on merged checkpoints is significantly reduced, which defeats the purpose of this node — there is little compositional variety left to preserve. Merges are not recommended.
+- **DiT / `diffusion_model.`-namespace LoRAs.** Native-format LoRAs (keys starting with `diffusion_model.`) are fully supported. Kohya-style `lora_unet_` keys are handled on a best-effort basis and may not map perfectly on all architectures.
+- **No text-encoder scheduling.** This node schedules the diffusion model (UNet/DiT) portion only.
+- The node monkey-patches module `forward` methods on the live model. This is gated and inert when no scheduled LoRA is active, but it is the trade-off that makes dynamic VRAM loading compatibility possible.
+- Developed against ComfyUI with Anima / Qwen-Image. Other model families should work where the LoRA keys resolve onto submodules, but they are untested.
+
+---
+
+## License
+
+MIT (or choose your preferred license).
