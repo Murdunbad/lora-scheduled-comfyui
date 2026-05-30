@@ -75,7 +75,7 @@ Let the base model build the composition, then bring the LoRA in:
 
 ```
 lora_strength = 1.0 - 1.5
-inject_at     = 0.15 – 0.20
+inject_at     = 0.10 – 0.20 (start with 0.20)
 stop_at       = 1.0
 fade          = 0.0
 ```
