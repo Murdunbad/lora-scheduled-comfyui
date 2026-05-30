@@ -119,6 +119,7 @@ Each LoRA can be injected at its own point in the denoise, all feeding a single 
 ## Notes & limitations
 
 - **Use a clean base model, not a merge.** Diversity on merged checkpoints is significantly reduced, which defeats the purpose of this node — there is little compositional variety left to preserve. Merges are not recommended.
+- If you still want to use merge, then reduce the number of quality tags and lower the cfg/increase the shift.
 - **DiT / `diffusion_model.`-namespace LoRAs.** Native-format LoRAs (keys starting with `diffusion_model.`) are fully supported. Kohya-style `lora_unet_` keys are handled on a best-effort basis and may not map perfectly on all architectures.
 - **No text-encoder scheduling.** This node schedules the diffusion model (UNet/DiT) portion only.
 - The node monkey-patches module `forward` methods on the live model. This is gated and inert when no scheduled LoRA is active, but it is the trade-off that makes dynamic VRAM loading compatibility possible.
