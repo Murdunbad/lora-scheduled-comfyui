@@ -40,7 +40,7 @@ If you have [ComfyUI-Manager](https://github.com/ltdrdata/ComfyUI-Manager) insta
 2. Click **Install via Git URL**.
 3. Paste this repository's URL:
    ```
-   https://github.com/YOUR_USERNAME/YOUR_REPO.git
+   https://github.com/Murdunbad/lora-scheduled-comfyui
    ```
 4. Click **OK**, then **Restart** ComfyUI when prompted.
 
