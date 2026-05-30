@@ -81,7 +81,7 @@ fade          = 0.0 - 0.05
 ```
 
 - **`inject_at` is your main dial.** Lower (0.1) = more fidelity, the LoRA locks in sooner. Higher (0.3) = more pose/angle diversity, the effect is slightly softer.
-- Values above ~0.3 tend to weaken the result noticeably; values below ~0.1 start to constrain composition like a normal loader. **0.15–0.20 is the sweet spot.**
+- Values above ~0.3 tend to weaken the result noticeably; values below ~0.1 start to constrain composition like a normal loader. **0.10–0.20 is the sweet spot.**
 - Because the LoRA is off during composition, you have more headroom on `lora_strength` than you normally would.
 
 > **Base model matters.** This node relies on the base model's own compositional variety during the early steps. **Merged checkpoints tend to have significantly reduced diversity** — their compositions are already collapsed toward a narrow distribution, so there is little variety left for the node to preserve. For best results use a clean base model rather than a merge; on merges the benefit of timestep scheduling is largely lost.
