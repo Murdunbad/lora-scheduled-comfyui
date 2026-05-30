@@ -116,20 +116,6 @@ Each LoRA can be injected at its own point in the denoise, all feeding a single 
 
 ---
 
-## Tips
-
-- **Tuning:** keep `force_rerun = True` while searching for good values so you always get a fresh generation. Switch it to `False` once you've locked your settings.
-- **Console debug:** the node prints the per-step weight for the first several steps, e.g.
-  ```
-  [LoRAScheduled] sigma=... active=['MyLora'] w={'MyLora': 0.0}
-  ...
-  [LoRAScheduled] sigma=... w={'MyLora': 1.0}
-  ```
-  Use this to confirm the LoRA is off early and ramps up exactly where you expect.
-- **Narrow windows + large fade:** if the window is small (e.g. `0.0–0.2`) keep `fade` low (`0.05–0.1`), otherwise the fades eat into the plateau and the LoRA never reaches full strength. The node clamps this to stay safe, but you'll get a weaker peak.
-
----
-
 ## Notes & limitations
 
 - **Use a clean base model, not a merge.** Diversity on merged checkpoints is significantly reduced, which defeats the purpose of this node — there is little compositional variety left to preserve. Merges are not recommended.
