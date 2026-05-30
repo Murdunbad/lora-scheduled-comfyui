@@ -4,19 +4,6 @@ import weakref
 import comfy.utils
 import folder_paths
 
-
-# ----------------------------------------------------------------------
-# LoRA Scheduled (timestep) — DiT-only, chainable, stack-proof.
-# ОКОННАЯ модель: LoRA активна между inject_at и stop_at, снаружи = 0.
-#   lora_strength — сила LoRA (как в обычном лоадере)
-#   inject_at     — % гена, с которого LoRA включается
-#   stop_at       — % гена, на котором LoRA выключается
-#   fade          — плавность на обоих краях окна (0 = резко)
-#   force_rerun   — True: каждый Queue генерит заново (для тестов)
-# Выключение ноды — стандартный bypass (Ctrl+B), без рестарта ComfyUI.
-# Переживает dynamic VRAM loading Anima (добавка к выходу, не к весам).
-# ----------------------------------------------------------------------
-
 _MOD_REG = weakref.WeakKeyDictionary()
 _ALL_ENTRIES = {}
 _ACTIVE_KEYS = set()
@@ -160,6 +147,7 @@ class LoRAScheduledTimestep:
         return {"required": {
             "model": ("MODEL",),
             "lora_name": (folder_paths.get_filename_list("loras"),),
+            "enabled": ("BOOLEAN", {"default": True}),
             "lora_strength": ("FLOAT", {"default": 1.0, "min": -3.0, "max": 3.0, "step": 0.05}),
             "inject_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             "stop_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -168,9 +156,9 @@ class LoRAScheduledTimestep:
         }}
 
     @classmethod
-    def IS_CHANGED(cls, model, lora_name, lora_strength,
+    def IS_CHANGED(cls, model, lora_name, enabled, lora_strength,
                    inject_at, stop_at, fade, force_rerun):
-        base = f"{lora_name}|{lora_strength}|{inject_at}|{stop_at}|{fade}"
+        base = f"{lora_name}|{enabled}|{lora_strength}|{inject_at}|{stop_at}|{fade}"
         if force_rerun:
             return base + f"|{time.time()}"
         return base
@@ -179,9 +167,12 @@ class LoRAScheduledTimestep:
     FUNCTION = "apply"
     CATEGORY = "advanced/lora_schedule"
 
-    def apply(self, model, lora_name, lora_strength,
+    def apply(self, model, lora_name, enabled, lora_strength,
               inject_at, stop_at, fade, force_rerun):
         m = model.clone()
+
+        if not enabled:
+            return (m,)
 
         if stop_at <= inject_at:
             stop_at = min(1.0, inject_at + 0.01)
