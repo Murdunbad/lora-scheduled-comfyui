@@ -151,4 +151,4 @@ Each LoRA can be injected at its own point in the denoise, all feeding a single 
 
 ## License
 
-MIT (or choose your preferred license).
+MIT.
