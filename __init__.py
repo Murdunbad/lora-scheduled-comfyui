@@ -2,7 +2,29 @@ import time
 import torch
 import weakref
 import comfy.utils
+import comfy.lora
 import folder_paths
+
+
+# ----------------------------------------------------------------------
+# LoRA Scheduled (timestep) — DiT-only, chainable, stack-proof.
+# Windowed model: the LoRA is active between inject_at and stop_at,
+# and contributes zero outside that window.
+#   enabled       — toggle the LoRA on/off (the node still executes when
+#                   disabled, so force_rerun keeps working — unlike bypass)
+#   lora_strength — LoRA strength, same meaning as a normal loader
+#   inject_at     — denoise percent where the LoRA turns on
+#   stop_at       — denoise percent where the LoRA turns off
+#   fade          — smoothing on both edges of the window (0 = hard)
+#   force_rerun   — True: every queue forces a fresh generation (testing)
+# Key mapping comes from comfy.lora.model_lora_keys_unet, so it covers
+# every layer (including underscore names like cross_attn / q_proj),
+# exactly like the stock LoRA loader. The up/down/alpha tensors are read
+# from the file directly, so we do not depend on ComfyUI's internal patch
+# format. Computed in fp32 to match a weight-merge loader as closely as
+# possible. Survives Anima dynamic VRAM loading (adds to the output, not
+# to the stored weights).
+# ----------------------------------------------------------------------
 
 _MOD_REG = weakref.WeakKeyDictionary()
 _ALL_ENTRIES = {}
@@ -22,36 +44,45 @@ def _get_submodule(root, dotted):
     return cur
 
 
-def _parse_lora(sd):
+def _parse_lora_with_map(sd, key_map):
+    # Group up/down/alpha by base name and resolve to the real model
+    # weight key using ComfyUI's own key map.
+    # Returns: { model_weight_key : (up, down, scale) }, unmapped[]
     groups = {}
-    def base_of(k, suf): return k[:-len(suf)]
+
+    def add(base, kind, v):
+        groups.setdefault(base, {})[kind] = v
+
     for k, v in sd.items():
         if k.endswith(".lora_down.weight"):
-            groups.setdefault(base_of(k, ".lora_down.weight"), {})["down"] = v
+            add(k[:-len(".lora_down.weight")], "down", v)
         elif k.endswith(".lora_up.weight"):
-            groups.setdefault(base_of(k, ".lora_up.weight"), {})["up"] = v
+            add(k[:-len(".lora_up.weight")], "up", v)
         elif k.endswith(".lora_A.weight"):
-            groups.setdefault(base_of(k, ".lora_A.weight"), {})["down"] = v
+            add(k[:-len(".lora_A.weight")], "down", v)
         elif k.endswith(".lora_B.weight"):
-            groups.setdefault(base_of(k, ".lora_B.weight"), {})["up"] = v
+            add(k[:-len(".lora_B.weight")], "up", v)
         elif k.endswith(".alpha"):
-            groups.setdefault(base_of(k, ".alpha"), {})["alpha"] = v
+            add(k[:-len(".alpha")], "alpha", v)
+
     result = {}
+    unmapped = []
     for base, d in groups.items():
         if "up" not in d or "down" not in d:
             continue
-        if base.startswith("diffusion_model."):
-            path = base[len("diffusion_model."):]
-        elif base.startswith("lora_unet_"):
-            path = base[len("lora_unet_"):].replace("_", ".")
-        else:
-            path = base
+        model_key = key_map.get(base)
+        if model_key is None:
+            unmapped.append(base)
+            continue
         up = d["up"].float()
         down = d["down"].float()
+        if up.ndim != 2 or down.ndim != 2:
+            unmapped.append(base)
+            continue
         rank = down.shape[0]
         alpha = float(d["alpha"]) if "alpha" in d else float(rank)
-        result[path] = (up, down, alpha / rank)
-    return result
+        result[model_key] = (up, down, alpha / rank)
+    return result, unmapped
 
 
 def _ensure_hook(module):
@@ -77,7 +108,7 @@ def _ensure_hook(module):
                 cache = (c["up"].to(dev), c["down"].to(dev))
                 c["cache"][dev] = cache
             up_dev, down_dev = cache
-            xin = x.to(up_dev.dtype)
+            xin = x.float()
             add = torch.nn.functional.linear(
                 torch.nn.functional.linear(xin, down_dev), up_dev)
             add = add * (c["scale"] * w)
@@ -144,21 +175,24 @@ def _make_wrapper(my_keys):
 class LoRAScheduledTimestep:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "model": ("MODEL",),
-            "lora_name": (folder_paths.get_filename_list("loras"),),
-            "enabled": ("BOOLEAN", {"default": True}),
-            "lora_strength": ("FLOAT", {"default": 1.0, "min": -3.0, "max": 3.0, "step": 0.05}),
-            "inject_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-            "stop_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-            "fade": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01}),
-            "force_rerun": ("BOOLEAN", {"default": True}),
-        }}
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "enabled": ("BOOLEAN", {"default": True}),
+                "lora_strength": ("FLOAT", {"default": 1.0, "min": -3.0, "max": 3.0, "step": 0.05}),
+                "inject_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "stop_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "fade": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 0.5, "step": 0.01}),
+                "force_rerun": ("BOOLEAN", {"default": True}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
 
     @classmethod
     def IS_CHANGED(cls, model, lora_name, enabled, lora_strength,
-                   inject_at, stop_at, fade, force_rerun):
-        base = f"{lora_name}|{enabled}|{lora_strength}|{inject_at}|{stop_at}|{fade}"
+                   inject_at, stop_at, fade, force_rerun, unique_id=None):
+        base = f"{unique_id}|{lora_name}|{enabled}|{lora_strength}|{inject_at}|{stop_at}|{fade}"
         if force_rerun:
             return base + f"|{time.time()}"
         return base
@@ -168,7 +202,7 @@ class LoRAScheduledTimestep:
     CATEGORY = "advanced/lora_schedule"
 
     def apply(self, model, lora_name, enabled, lora_strength,
-              inject_at, stop_at, fade, force_rerun):
+              inject_at, stop_at, fade, force_rerun, unique_id=None):
         m = model.clone()
 
         if not enabled:
@@ -179,7 +213,12 @@ class LoRAScheduledTimestep:
 
         path = folder_paths.get_full_path("loras", lora_name)
         sd = comfy.utils.load_torch_file(path, safe_load=True)
-        deltas = _parse_lora(sd)
+
+        # ComfyUI's native mapping: lora key -> real model weight key.
+        # Handles underscore names (cross_attn, q_proj, etc.).
+        key_map = comfy.lora.model_lora_keys_unet(m.model, {})
+        deltas, unmapped = _parse_lora_with_map(sd, key_map)
+
         dm = m.model.diffusion_model
 
         ms = m.model.model_sampling
@@ -193,7 +232,9 @@ class LoRAScheduledTimestep:
         s_c = float(ms.percent_to_sigma(float(p_c)))
         s_d = float(ms.percent_to_sigma(float(p_d)))
 
-        key = lora_name
+        # Unique per-node key (not per-file), so the same LoRA can be used
+        # in several nodes without their settings colliding.
+        key = f"{lora_name}#{unique_id}"
         holder = {"w": 0.0}
         _ALL_ENTRIES[key] = {
             "holder": holder, "s_a": s_a, "s_b": s_b,
@@ -202,9 +243,17 @@ class LoRAScheduledTimestep:
 
         _DBG["n"] = 0
         matched = 0
-        for p, (up, down, scale) in deltas.items():
-            mod = _get_submodule(dm, p)
+        skipped = []
+        for model_key, (up, down, scale) in deltas.items():
+            if model_key.startswith("diffusion_model.") and model_key.endswith(".weight"):
+                sub = model_key[len("diffusion_model."):-len(".weight")]
+            elif model_key.endswith(".weight"):
+                sub = model_key[:-len(".weight")]
+            else:
+                sub = model_key
+            mod = _get_submodule(dm, sub)
             if mod is None or not hasattr(mod, "weight"):
+                skipped.append(model_key)
                 continue
             _ensure_hook(mod)
             reg = _MOD_REG.get(mod)
@@ -212,14 +261,20 @@ class LoRAScheduledTimestep:
                 reg = {}
                 _MOD_REG[mod] = reg
             reg[key] = {
-                "up": up.half(), "down": down.half(),
+                "up": up.float(), "down": down.float(),
                 "scale": scale, "holder": holder, "cache": {},
             }
             matched += 1
 
-        print(f"[LoRAScheduled] {lora_name}: modules={matched} "
-              f"window[{inject_at}..{stop_at}] fade={fade} strength={lora_strength} "
-              f"(s_a={s_a:.2f} s_b={s_b:.2f} s_c={s_c:.2f} s_d={s_d:.2f})")
+        print(f"[LoRAScheduled] {key}: matched={matched} "
+              f"skipped={len(skipped)} unmapped={len(unmapped)} "
+              f"window[{inject_at}..{stop_at}] fade={fade} strength={lora_strength}")
+        if unmapped:
+            print(f"[LoRAScheduled] WARNING: {len(unmapped)} unmapped keys "
+                  f"(LoRA may not apply fully). First: {unmapped[0]}")
+        if skipped:
+            print(f"[LoRAScheduled] WARNING: {len(skipped)} mapped keys had no "
+                  f"matching module. First: {skipped[0]}")
 
         keys = list(m.model_options.get("_sched_keys", []))
         if key not in keys:
