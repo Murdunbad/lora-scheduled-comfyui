@@ -77,7 +77,7 @@ Let the base model build the composition, then bring the LoRA in:
 lora_strength = 1.0 - 1.5
 inject_at     = 0.10 – 0.20 (start with 0.20)
 stop_at       = 1.0
-fade          = 0.0
+fade          = 0.0 - 0.05
 ```
 
 - **`inject_at` is your main dial.** Lower (0.1) = more fidelity, the LoRA locks in sooner. Higher (0.3) = more pose/angle diversity, the effect is slightly softer.
