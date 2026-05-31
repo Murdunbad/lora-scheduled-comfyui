@@ -57,7 +57,7 @@ After installation the node appears under **`advanced/lora_schedule → LoRA Sch
 | `model` | Model input. Chainable — connect the output to another node of this type to stack multiple scheduled LoRAs. |
 | `lora_name` | The LoRA file to load (from your `models/loras` folder). |
 | `enabled` | Toggle the LoRA on/off. Unlike bypass, the node still executes when disabled, so `force_rerun` keeps working. |
-| `apply_to` | Which CFG branch the LoRA affects: `both`, `positive` (cond only), or `negative` (uncond only). See [Targeting the CFG branch](#targeting-the-cfg-branch). |
+| `apply_to` | Which CFG branch the LoRA affects: `both`, `positive` (cond only), or `negative` (uncond only). |
 | `lora_strength` | LoRA strength, same meaning as in a normal loader. Higher = stronger effect. |
 | `inject_at` | Denoise percent at which the LoRA **turns on** (`0.0` = start, `1.0` = end). |
 | `stop_at` | Denoise percent at which the LoRA **turns off**. |
