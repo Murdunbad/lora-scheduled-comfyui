@@ -8,27 +8,30 @@ import folder_paths
 
 # ----------------------------------------------------------------------
 # LoRA Scheduled (timestep) — DiT-only, chainable, stack-proof.
-# Windowed model: the LoRA is active between inject_at and stop_at,
-# and contributes zero outside that window.
-#   enabled       — toggle the LoRA on/off (the node still executes when
-#                   disabled, so force_rerun keeps working — unlike bypass)
-#   lora_strength — LoRA strength, same meaning as a normal loader
-#   inject_at     — denoise percent where the LoRA turns on
-#   stop_at       — denoise percent where the LoRA turns off
-#   fade          — smoothing on both edges of the window (0 = hard)
-#   force_rerun   — True: every queue forces a fresh generation (testing)
-# Key mapping comes from comfy.lora.model_lora_keys_unet, so it covers
-# every layer (including underscore names like cross_attn / q_proj),
-# exactly like the stock LoRA loader. The up/down/alpha tensors are read
-# from the file directly, so we do not depend on ComfyUI's internal patch
-# format. Computed in fp32 to match a weight-merge loader as closely as
-# possible. Survives Anima dynamic VRAM loading (adds to the output, not
-# to the stored weights).
+# Three axes of control:
+#   WHEN  — inject_at / stop_at / fade   (window over denoise progress)
+#   WHERE — apply_to: both / positive / negative   (CFG branch routing)
+#   HOW   — lora_strength
+#
+# apply_to routes the LoRA into only one side of the CFG split:
+#   both      — normal, affects cond and uncond (like a stock loader)
+#   positive  — LoRA only in the cond pass; pushes the image toward the
+#               LoRA, amplified cleanly through CFG, uncond stays neutral
+#   negative  — LoRA only in the uncond pass; the model is pushed AWAY
+#               from the LoRA (use any LoRA as a negative concept)
+# Requires CFG > 1 to have a separate uncond pass; at CFG=1 positive/
+# negative behave like 'both' (only one pass exists).
+#
+# Key mapping comes from comfy.lora.model_lora_keys_unet, covering every
+# layer (including underscore names like cross_attn / q_proj), exactly
+# like the stock loader. up/down/alpha are read from the file directly.
+# Computed in fp32. Survives Anima dynamic VRAM loading (adds to output).
 # ----------------------------------------------------------------------
 
 _MOD_REG = weakref.WeakKeyDictionary()
 _ALL_ENTRIES = {}
 _ACTIVE_KEYS = set()
+_BATCH_INFO = {"cou": None}
 _DBG = {"n": 0}
 
 
@@ -45,9 +48,6 @@ def _get_submodule(root, dotted):
 
 
 def _parse_lora_with_map(sd, key_map):
-    # Group up/down/alpha by base name and resolve to the real model
-    # weight key using ComfyUI's own key map.
-    # Returns: { model_weight_key : (up, down, scale) }, unmapped[]
     groups = {}
 
     def add(base, kind, v):
@@ -85,6 +85,25 @@ def _parse_lora_with_map(sd, key_map):
     return result, unmapped
 
 
+def _branch_mask(batch, cou, want_cond, want_uncond, device, dtype):
+    # cou is the cond_or_uncond list: 0 = cond (positive), 1 = uncond.
+    # The batch is split into len(cou) equal chunks along dim 0.
+    if cou is None or len(cou) == 0:
+        return None
+    n = len(cou)
+    if batch % n != 0:
+        return None
+    chunk = batch // n
+    mask = torch.zeros(batch, device=device, dtype=dtype)
+    for i, val in enumerate(cou):
+        lo = i * chunk
+        hi = lo + chunk
+        is_cond = (int(val) == 0)
+        if (is_cond and want_cond) or ((not is_cond) and want_uncond):
+            mask[lo:hi] = 1.0
+    return mask
+
+
 def _ensure_hook(module):
     if getattr(module, "_sched_lora_installed", False):
         return
@@ -99,7 +118,8 @@ def _ensure_hook(module):
         for key, c in contribs.items():
             if key not in _ACTIVE_KEYS:
                 continue
-            w = c["holder"].get("w", 0.0)
+            holder = c["holder"]
+            w = holder.get("w", 0.0)
             if abs(w) < 1e-6:
                 continue
             dev = x.device
@@ -112,6 +132,18 @@ def _ensure_hook(module):
             add = torch.nn.functional.linear(
                 torch.nn.functional.linear(xin, down_dev), up_dev)
             add = add * (c["scale"] * w)
+
+            apply_to = holder.get("apply_to", "both")
+            if apply_to != "both":
+                want_cond = (apply_to == "positive")
+                want_uncond = (apply_to == "negative")
+                mask = _branch_mask(
+                    add.shape[0], _BATCH_INFO.get("cou"),
+                    want_cond, want_uncond, add.device, add.dtype)
+                if mask is not None:
+                    shape = [add.shape[0]] + [1] * (add.ndim - 1)
+                    add = add * mask.view(shape)
+
             add_total = add if add_total is None else add_total + add
         if add_total is None:
             return out
@@ -133,6 +165,10 @@ def _make_wrapper(my_keys):
             cur_sigma = float(t.flatten()[0])
         except Exception:
             cur_sigma = 0.0
+
+        c = args.get("c", {})
+        topts = c.get("transformer_options", {}) if isinstance(c, dict) else {}
+        _BATCH_INFO["cou"] = topts.get("cond_or_uncond")
 
         for key in my_keys:
             e = _ALL_ENTRIES.get(key)
@@ -157,7 +193,8 @@ def _make_wrapper(my_keys):
             e["holder"]["w"] = w
 
         if _DBG["n"] < 10:
-            print(f"[LoRAScheduled] sigma={cur_sigma:.3f} active={list(my_keys)} "
+            print(f"[LoRAScheduled] sigma={cur_sigma:.3f} cou={_BATCH_INFO['cou']} "
+                  f"active={list(my_keys)} "
                   f"w={ {k: round(_ALL_ENTRIES[k]['holder']['w'],3) for k in my_keys if k in _ALL_ENTRIES} }")
             _DBG["n"] += 1
 
@@ -180,6 +217,7 @@ class LoRAScheduledTimestep:
                 "model": ("MODEL",),
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "enabled": ("BOOLEAN", {"default": True}),
+                "apply_to": (["both", "positive", "negative"], {"default": "both"}),
                 "lora_strength": ("FLOAT", {"default": 1.0, "min": -3.0, "max": 3.0, "step": 0.05}),
                 "inject_at": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "stop_at": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -190,9 +228,10 @@ class LoRAScheduledTimestep:
         }
 
     @classmethod
-    def IS_CHANGED(cls, model, lora_name, enabled, lora_strength,
+    def IS_CHANGED(cls, model, lora_name, enabled, apply_to, lora_strength,
                    inject_at, stop_at, fade, force_rerun, unique_id=None):
-        base = f"{unique_id}|{lora_name}|{enabled}|{lora_strength}|{inject_at}|{stop_at}|{fade}"
+        base = (f"{unique_id}|{lora_name}|{enabled}|{apply_to}|{lora_strength}"
+                f"|{inject_at}|{stop_at}|{fade}")
         if force_rerun:
             return base + f"|{time.time()}"
         return base
@@ -201,7 +240,7 @@ class LoRAScheduledTimestep:
     FUNCTION = "apply"
     CATEGORY = "advanced/lora_schedule"
 
-    def apply(self, model, lora_name, enabled, lora_strength,
+    def apply(self, model, lora_name, enabled, apply_to, lora_strength,
               inject_at, stop_at, fade, force_rerun, unique_id=None):
         m = model.clone()
 
@@ -214,8 +253,6 @@ class LoRAScheduledTimestep:
         path = folder_paths.get_full_path("loras", lora_name)
         sd = comfy.utils.load_torch_file(path, safe_load=True)
 
-        # ComfyUI's native mapping: lora key -> real model weight key.
-        # Handles underscore names (cross_attn, q_proj, etc.).
         key_map = comfy.lora.model_lora_keys_unet(m.model, {})
         deltas, unmapped = _parse_lora_with_map(sd, key_map)
 
@@ -232,10 +269,8 @@ class LoRAScheduledTimestep:
         s_c = float(ms.percent_to_sigma(float(p_c)))
         s_d = float(ms.percent_to_sigma(float(p_d)))
 
-        # Unique per-node key (not per-file), so the same LoRA can be used
-        # in several nodes without their settings colliding.
         key = f"{lora_name}#{unique_id}"
-        holder = {"w": 0.0}
+        holder = {"w": 0.0, "apply_to": apply_to}
         _ALL_ENTRIES[key] = {
             "holder": holder, "s_a": s_a, "s_b": s_b,
             "s_c": s_c, "s_d": s_d, "strength": float(lora_strength),
@@ -268,7 +303,8 @@ class LoRAScheduledTimestep:
 
         print(f"[LoRAScheduled] {key}: matched={matched} "
               f"skipped={len(skipped)} unmapped={len(unmapped)} "
-              f"window[{inject_at}..{stop_at}] fade={fade} strength={lora_strength}")
+              f"apply_to={apply_to} window[{inject_at}..{stop_at}] "
+              f"fade={fade} strength={lora_strength}")
         if unmapped:
             print(f"[LoRAScheduled] WARNING: {len(unmapped)} unmapped keys "
                   f"(LoRA may not apply fully). First: {unmapped[0]}")
