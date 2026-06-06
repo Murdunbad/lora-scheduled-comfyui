@@ -1,5 +1,6 @@
 import time
 import torch
+import torch.nn.functional as F
 import weakref
 import comfy.utils
 import comfy.lora
@@ -12,20 +13,12 @@ import folder_paths
 #   WHEN  — inject_at / stop_at / fade   (window over denoise progress)
 #   WHERE — apply_to: both / positive / negative   (CFG branch routing)
 #   HOW   — lora_strength
-#
-# apply_to routes the LoRA into only one side of the CFG split:
-#   both      — normal, affects cond and uncond (like a stock loader)
-#   positive  — LoRA only in the cond pass; pushes the image toward the
-#               LoRA, amplified cleanly through CFG, uncond stays neutral
-#   negative  — LoRA only in the uncond pass; the model is pushed AWAY
-#               from the LoRA (use any LoRA as a negative concept)
-# Requires CFG > 1 to have a separate uncond pass; at CFG=1 positive/
-# negative behave like 'both' (only one pass exists).
-#
-# Key mapping comes from comfy.lora.model_lora_keys_unet, covering every
-# layer (including underscore names like cross_attn / q_proj), exactly
-# like the stock loader. up/down/alpha are read from the file directly.
-# Computed in fp32. Survives Anima dynamic VRAM loading (adds to output).
+# The LoRA add is computed in the model's native dtype (bf16/fp16) for
+# speed: no per-layer fp32 copy of activations. Tiny numerical difference
+# vs a weight-merge loader, not visible in practice.
+# Key mapping from comfy.lora.model_lora_keys_unet (covers cross_attn /
+# q_proj etc.). up/down/alpha read from the file directly. Survives Anima
+# dynamic VRAM loading (adds to output, not to stored weights).
 # ----------------------------------------------------------------------
 
 _MOD_REG = weakref.WeakKeyDictionary()
@@ -86,8 +79,6 @@ def _parse_lora_with_map(sd, key_map):
 
 
 def _branch_mask(batch, cou, want_cond, want_uncond, device, dtype):
-    # cou is the cond_or_uncond list: 0 = cond (positive), 1 = uncond.
-    # The batch is split into len(cou) equal chunks along dim 0.
     if cou is None or len(cou) == 0:
         return None
     n = len(cou)
@@ -122,15 +113,17 @@ def _ensure_hook(module):
             w = holder.get("w", 0.0)
             if abs(w) < 1e-6:
                 continue
+
             dev = x.device
-            cache = c["cache"].get(dev)
+            dt = x.dtype
+            ckey = (dev, dt)
+            cache = c["cache"].get(ckey)
             if cache is None:
-                cache = (c["up"].to(dev), c["down"].to(dev))
-                c["cache"][dev] = cache
+                cache = (c["up"].to(dev, dt), c["down"].to(dev, dt))
+                c["cache"][ckey] = cache
             up_dev, down_dev = cache
-            xin = x.float()
-            add = torch.nn.functional.linear(
-                torch.nn.functional.linear(xin, down_dev), up_dev)
+
+            add = F.linear(F.linear(x, down_dev), up_dev)
             add = add * (c["scale"] * w)
 
             apply_to = holder.get("apply_to", "both")
