@@ -91,8 +91,8 @@ When CFG > 1, the model runs two predictions per step: a **positive (cond)** pas
 Let the base model build the composition, then bring the LoRA in:
 
 ~~~
-apply_to      = positive
-lora_strength = 0.5 - 1.0
+apply_to      = positive or both
+lora_strength = 0.5 - 1.0 (lower if apply_to = positive)
 inject_at     = 0.10 – 0.20 (start with 0.20)
 stop_at       = 1.0
 fade          = 0.0 - 0.05
